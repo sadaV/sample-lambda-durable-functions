@@ -183,6 +183,191 @@ Resources:
       LogGroupName: /aws/lambda/healthcare-pa-coordinator
       RetentionInDays: 30
 
+  # ─── PA Demo API Gateway ──────────────────────────────────────────────────────
+  PaDemoApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+
+  # ─── API Lambda Handlers ─────────────────────────────────────────────────────
+  StartExecutionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/api/start-execution.handler
+      Environment:
+        Variables:
+          COORDINATOR_FUNCTION_NAME: !Sub '${CoordinatorFunction.Arn}:live'
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource:
+                - !GetAtt CoordinatorFunction.Arn
+                - !Sub '${CoordinatorFunction.Arn}:*'
+      Events:
+        PostExecutions:
+          Type: Api
+          Properties:
+            RestApiId: !Ref PaDemoApi
+            Path: /executions
+            Method: POST
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2022
+        EntryPoints: [src/handlers/api/start-execution.ts]
+
+  GetHistoryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/api/get-history.handler
+      Environment:
+        Variables:
+          COORDINATOR_FUNCTION_NAME: !Sub '${CoordinatorFunction.Arn}:live'
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - lambda:GetDurableExecution
+                - lambda:GetDurableExecutionHistory
+              Resource:
+                - !GetAtt CoordinatorFunction.Arn
+                - !Sub '${CoordinatorFunction.Arn}:*'
+      Events:
+        GetHistory:
+          Type: Api
+          Properties:
+            RestApiId: !Ref PaDemoApi
+            Path: /executions/{executionArn}/history
+            Method: GET
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2022
+        EntryPoints: [src/handlers/api/get-history.ts]
+
+  SendCallbackFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/api/send-callback.handler
+      Environment:
+        Variables:
+          COORDINATOR_FUNCTION_NAME: !Sub '${CoordinatorFunction.Arn}:live'
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - lambda:SendDurableExecutionCallbackSuccess
+              Resource: '*'
+      Events:
+        PostCallback:
+          Type: Api
+          Properties:
+            RestApiId: !Ref PaDemoApi
+            Path: /executions/{executionArn}/callbacks/{callbackId}
+            Method: POST
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2022
+        EntryPoints: [src/handlers/api/send-callback.ts]
+
+  ListExecutionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/api/list-executions.handler
+      Environment:
+        Variables:
+          COORDINATOR_FUNCTION_NAME: !Sub '${CoordinatorFunction.Arn}:live'
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - lambda:ListDurableExecutionsByFunction
+              Resource:
+                - !GetAtt CoordinatorFunction.Arn
+                - !Sub '${CoordinatorFunction.Arn}:*'
+      Events:
+        GetExecutions:
+          Type: Api
+          Properties:
+            RestApiId: !Ref PaDemoApi
+            Path: /executions
+            Method: GET
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2022
+        EntryPoints: [src/handlers/api/list-executions.ts]
+
+  # ─── Demo UI Static Website Hosting (CloudFront + OAC) ───────────────────────
+  DemoUIBucket:
+    Type: AWS::S3::Bucket
+
+  DemoUIBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DemoUIBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${DemoUIBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${DemoUIDistribution}'
+
+  DemoUIOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-demo-ui-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  DemoUIDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt DemoUIBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt DemoUIOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          Compress: true
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
 Outputs:
   CoordinatorFunctionArn:
     Description: Qualified ARN for invoking the PA coordinator
@@ -197,3 +382,12 @@ Outputs:
     Value: !GetAtt MedicalNecessityAgentRuntime.AgentRuntimeArn
   SynthesisAgentArn:
     Value: !GetAtt SynthesisAgentRuntime.AgentRuntimeArn
+  PaDemoApiUrl:
+    Description: URL for the PA Demo API Gateway
+    Value: !Sub 'https://${PaDemoApi}.execute-api.${AWS::Region}.amazonaws.com/Prod'
+  DemoUIBucketUrl:
+    Description: CloudFront URL for the Demo UI
+    Value: !Sub 'https://${DemoUIDistribution.DomainName}'
+  DemoUIBucketName:
+    Description: Name of the S3 bucket for syncing UI assets
+    Value: !Ref DemoUIBucket

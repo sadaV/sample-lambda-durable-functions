@@ -73,14 +73,29 @@ def run_agent(payload: dict, callback_id: str, task_id: str):
         )
 
         result = agent(prompt)
-        answer = _last_tool_result if _last_tool_result else json.loads(str(result))
+
+        # Use tool result if available, otherwise try to parse agent output
+        if _last_tool_result:
+            answer = _last_tool_result
+        else:
+            try:
+                answer = json.loads(str(result))
+            except (json.JSONDecodeError, TypeError):
+                # Fallback: wrap the raw text response
+                answer = {"response": str(result), "status": "completed"}
 
         lambda_client.send_durable_execution_callback_success(
             CallbackId=callback_id, Result=json.dumps(answer)
         )
     except Exception as e:
         logger.error("Policy agent failed: %s", e)
-        lambda_client.send_durable_execution_callback_failure(CallbackId=callback_id, Error=str(e))
+        try:
+            lambda_client.send_durable_execution_callback_failure(
+                CallbackId=callback_id,
+                Error={"ErrorMessage": str(e), "ErrorType": type(e).__name__}
+            )
+        except Exception as cb_err:
+            logger.error("Failed to send callback failure: %s", cb_err)
     finally:
         app.complete_async_task(task_id)
 

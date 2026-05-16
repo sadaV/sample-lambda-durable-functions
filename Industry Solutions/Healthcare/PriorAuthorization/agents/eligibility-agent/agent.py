@@ -71,7 +71,13 @@ def run_agent(payload: dict, callback_id: str, task_id: str):
         )
     except Exception as e:
         logger.error("Eligibility agent failed: %s", e)
-        lambda_client.send_durable_execution_callback_failure(CallbackId=callback_id, Error=str(e))
+        try:
+            lambda_client.send_durable_execution_callback_failure(
+                CallbackId=callback_id,
+                Error={"ErrorMessage": str(e), "ErrorType": type(e).__name__}
+            )
+        except Exception as cb_err:
+            logger.error("Failed to send callback failure: %s", cb_err)
     finally:
         app.complete_async_task(task_id)
 
